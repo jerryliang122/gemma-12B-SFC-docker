@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# llama.cpp SCF entrypoint
-# - binds 0.0.0.0:9000 (SCF Web function default)
-# - mandatory <30s startup (image pull + model load)
-# - omit --no-mmap since SCF GPU instances have ≥80G RAM
+# llama.cpp SCF entrypoint — wraps the upstream server-cuda image's
+# prebuilt llama-server binary with model + flags from env vars.
 
 set -euo pipefail
 
+# llama-server is on PATH in the upstream server-cuda image
 ARGS=("-m" "$MODEL_PATH")
 if [ -n "${MMPROJ_PATH:-}" ] && [ -f "$MMPROJ_PATH" ]; then
     ARGS+=("--mmproj" "$MMPROJ_PATH")
