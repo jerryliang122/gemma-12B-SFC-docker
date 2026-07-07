@@ -1,0 +1,162 @@
+name: Build SCF image
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: "Override MODEL_URL (HF LFS URL)"
+        required: false
+        type: string
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'entrypoint.sh'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      IMAGE_NAME: llama-scf-dev
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk (delete Android SDK leftovers)
+        run: |
+          sudo rm -rf /opt/android* /usr/local/lib/android /usr/share/dotnet
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up QEMU + Buildx
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=moby/buildkit:latest
+
+      - name: Cache Buildx layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Compute effective MODEL_URL
+        id: params
+        run: |
+          URL="${{ secrets.MODEL_URL }}"
+          if [ -n "${{ github.event.inputs.model_url }}" ]; then
+            URL="${{ github.event.inputs.model_url }}"
+          fi
+          if [ -z "$URL" ]; then
+            URL="https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q6_K.gguf"
+          fi
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Effective MODEL_URL: $URL"
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          build-args: |
+            MODEL_URL=${{ steps.params.outputs.url }}
+            MODEL_SHA256=${{ secrets.MODEL_SHA256 }}
+            MMPROJ_URL=${{ secrets.MMPROJ_URL }}
+            MMPROJ_SHA256=${{ secrets.MMPROJ_SHA256 }}
+
+      - name: Promote cache
+        run: |
+          if [ -d /tmp/.buildx-cache-new ]; then
+            rm -rf /tmp/.buildx-cache
+            mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          fi
+          df -h /
+
+      - name: Inspect image
+        run: |
+          docker images "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+          IMAGE_SIZE=$(docker images "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" --format "{{.Size}}")
+          echo "IMAGE_SIZE=$IMAGE_SIZE" >> $GITHUB_ENV
+          echo "## Build summary" >> $GITHUB_STEP_SUMMARY
+          echo "- docker image size: **$IMAGE_SIZE**" >> $GITHUB_STEP_SUMMARY
+          echo "- effective MODEL_URL: ${{ steps.params.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Probe binary + models inside image
+        run: |
+          echo "--- llama-server help ---"
+          docker run --rm --platform linux/amd64 \
+              --entrypoint llama-server \
+              "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" --help 2>&1 | head -20
+          echo
+          echo "--- /models contents ---"
+          docker run --rm --platform linux/amd64 \
+              --entrypoint ls \
+              "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" -la /models/
+
+      - name: Smoke test entrypoint boots (CPU mode, short timeout)
+        run: |
+          echo "--- Booting llama-server in CPU mode briefly to verify entrypoint + model load ---"
+          docker run --d --platform linux/amd64 \
+              -e LLAMA_EXTRA_ARGS="--n-gpu-layers 0 --ctx-size 512 --parallel 1 --log-disable" \
+              -p 19090:9000 \
+              --name llama-smoke \
+              "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" 2>&1 | tail -5
+          CONTAINER=$(docker ps -q --filter "name=llama-smoke" | head -1)
+          if [ -z "$CONTAINER" ]; then
+              docker logs llama-smoke 2>&1 | tail -50 || true
+              echo "[-] no container running"
+              exit 1
+          fi
+          for i in $(seq 1 90); do
+              sleep 2
+              if curl -sS --max-time 2 http://127.0.0.1:19090/health 2>/dev/null | grep -q '"status":"ok"'; then
+                  echo "[+] /health OK at iter $i (~$((i*2))s)"
+                  curl -sS --max-time 30 http://127.0.0.1:19090/v1/models | head -c 400
+                  echo
+                  break
+              fi
+              if ! docker ps -q --filter "name=llama-smoke" | grep -q .; then
+                  echo "[-] container exited before /health ready"
+                  docker logs llama-smoke 2>&1 | tail -50 || true
+                  break
+              fi
+          done
+          docker rm -f llama-smoke 2>/dev/null || true
+
+      - name: Save image to tarball (sanity check)
+        run: |
+          docker save "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" \
+              -o /tmp/${IMAGE_NAME}-${IMAGE_TAG}.tar
+          ls -lh /tmp/*.tar
+          TARBALL_SIZE=$(stat -c %s /tmp/${IMAGE_NAME}-${IMAGE_TAG}.tar)
+          echo "TARBALL_SIZE=$TARBALL_SIZE" >> $GITHUB_ENV
+          echo "- tarball size: $TARBALL_SIZE bytes (>2GB so cannot upload as artifact)" >> $GITHUB_STEP_SUMMARY
+          rm -f /tmp/*.tar
+          df -h /
+
+      - name: Finalize
+        run: |
+          echo
+          echo "==============================================="
+          echo " BUILD OK"
+          echo " image:  ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo " size:   ${IMAGE_SIZE}"
+          echo "==============================================="

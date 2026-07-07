@@ -1,0 +1,9 @@
+.git
+.github
+README.md
+Dockerfile
+.dockerignore
+entrypoint.sh
+*.md
+.DS_Store
+*.log
