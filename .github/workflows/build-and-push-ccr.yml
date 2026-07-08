@@ -77,14 +77,14 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b:v1
+            ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b:latest
             ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b:${{ github.sha }}
-          cache-from: type=registry,ref=ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b:v1
+          cache-from: type=registry,ref=ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b:latest
           cache-to: type=inline
 
       - name: Summary
         run: |
           echo "## CCR push" >> $GITHUB_STEP_SUMMARY
           echo "- registry: \`ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b\`" >> $GITHUB_STEP_SUMMARY
-          echo "- tags: v1, \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- tags: latest, \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- source: \`${{ github.sha }}\` commit" >> $GITHUB_STEP_SUMMARY
