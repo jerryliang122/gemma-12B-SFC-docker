@@ -114,7 +114,7 @@ jobs:
       - name: Smoke test entrypoint boots (CPU mode, short timeout)
         run: |
           echo "--- Booting llama-server in CPU mode briefly to verify entrypoint + model load ---"
-          docker run --d --platform linux/amd64 \
+          docker run -d --platform linux/amd64 \
               -e LLAMA_EXTRA_ARGS="--n-gpu-layers 0 --ctx-size 512 --parallel 1 --log-disable" \
               -p 19090:9000 \
               --name llama-smoke \
