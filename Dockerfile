@@ -1,67 +1,31 @@
-# syntax removed (use default frontend)
 # Single-stage: use the official ggml-org llama.cpp server-cuda image.
 # We previously tried a multi-stage self-compile approach but ran into the
 # libcuda.so.1 driver stub link problem on the nvidia/cuda devel image.
 # The upstream ggml-org/llama.cpp images already handle that for us.
+#
+# Model is NOT bundled in the image — at runtime the SCF function mounts a
+# CFS file system onto /mnt and entrypoint reads MODEL_PATH / MMPROJ_PATH
+# from there. This keeps the image small (~1.5 GB) and lets multiple model
+# versions share a single image without rebuilding.
 
 # Use a pinned tag for reproducibility (bXXXX follows the upstream commit).
-# Pin: server-cuda-b4721 (build number)
 ARG LLAMA_CPP_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda
 
 FROM ${LLAMA_CPP_IMAGE}
 
-ARG MODEL_URL=https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q6_K.gguf
-ARG MODEL_FILE=gemma-4-12b-it-Q6_K.gguf
-ARG MODEL_SHA256=
-
-ARG MMPROJ_URL=https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf
-ARG MMPROJ_FILE=mmproj-F16.gguf
-ARG MMPROJ_SHA256=
-
-# --- 模型准备 ---
-# 默认走"host 预下模型 + COPY"路线:把模型放到 build context 的 ./models/
-# 目录里(可以是真实文件或 symlink 到外部路径),docker build 阶段直接 COPY。
-#
-# 如果想走"镜像内 wget 下载"的旧路线,把环境变量 DOWNLOAD_IN_IMAGE=1 传进来。
-ARG DOWNLOAD_IN_IMAGE=0
-
-# Download model + mmproj (legacy /opt 路径)
-RUN if [ "$DOWNLOAD_IN_IMAGE" = "1" ]; then \
-      mkdir -p /models \
-      && cd /models \
-      && echo "Downloading $MODEL_FILE..." \
-      && curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 \
-              -o "$MODEL_FILE" "$MODEL_URL" \
-      && if [ -n "$MODEL_SHA256" ]; then \
-           echo "$MODEL_SHA256  $MODEL_FILE" | sha256sum -c -; \
-         else \
-           sha256sum "$MODEL_FILE"; \
-         fi \
-      && echo "Downloading $MMPROJ_FILE..." \
-      && curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 \
-              -o "$MMPROJ_FILE" "$MMPROJ_URL" \
-      && if [ -n "$MMPROJ_SHA256" ]; then \
-           echo "$MMPROJ_SHA256  $MMPROJ_FILE" | sha256sum -c -; \
-         else \
-           sha256sum "$MMPROJ_FILE"; \
-         fi \
-      && ls -lh /models; \
-    else \
-      mkdir -p /models; \
-    fi
-
-# Host 预下模型 + COPY 进镜像(主流路线)
-COPY --chown=root:root models/*.gguf /models/
-RUN ls -lh /models/ && sha256sum /models/*.gguf
+# Ensure CFS mount target directory exists in the image.
+# SCF will mount CFS here at function deployment time.
+RUN mkdir -p /mnt
 
 # Entrypoint wraps llama-server with the SCF-required port/env defaults
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# SCF Web function defaults (override at function level)
+# SCF Web function defaults — model lives on CFS mount, not in image.
+# Override at function level if mount layout differs.
 ENV GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
-    MODEL_PATH=/models/gemma-4-12b-it-Q6_K.gguf \
-    MMPROJ_PATH=/models/mmproj-F16.gguf \
+    MODEL_PATH=/mnt/model \
+    MMPROJ_PATH=/mnt/mmproj \
     LLAMA_HOST=0.0.0.0 \
     LLAMA_PORT=9000 \
     LLAMA_MAX_TOKENS=2048 \

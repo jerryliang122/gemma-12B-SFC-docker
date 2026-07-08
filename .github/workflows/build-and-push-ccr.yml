@@ -15,7 +15,7 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,32 +35,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: image=moby/buildkit:latest
-
-      - name: Download models via hf-mirror.com
-        run: |
-          mkdir -p models
-          cd models
-          # 国内镜像,早上 124 上实测 ~2.3 MB/s;走 hf-mirror.com
-          # 也试 huggingface.co fallback,看哪个快
-          echo "=== Try hf-mirror.com first ==="
-          timeout 30 wget --continue -q --show-progress \
-            "https://hf-mirror.com/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q6_K.gguf" \
-            -O gemma-4-12b-it-Q6_K.gguf 2>&1 | tail -1
-          HFEXIT=${PIPESTATUS[0]}
-          if [ "$HFEXIT" -ne 0 ]; then
-            echo "=== hf-mirror 失败,fallback huggingface.co ==="
-            rm -f gemma-4-12b-it-Q6_K.gguf
-            wget --continue -q \
-              "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q6_K.gguf" \
-              -O gemma-4-12b-it-Q6_K.gguf
-          fi
-          wget --continue -q \
-            "https://hf-mirror.com/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf" \
-            -O mmproj-F16.gguf
-          ls -lh .
-          echo "=== sha256 校验 ==="
-          sha256sum gemma-4-12b-it-Q6_K.gguf
-          sha256sum mmproj-F16.gguf
 
       - name: Login to Tencent Cloud CCR
         uses: docker/login-action@v3
