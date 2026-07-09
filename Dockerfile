@@ -13,16 +13,36 @@ ARG LLAMA_CPP_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda
 
 FROM ${LLAMA_CPP_IMAGE}
 
-# Ensure CFS mount target directory exists in the image.
-# SCF will mount CFS here at function deployment time.
+# Ensure CFS/COS mount target directory exists in the image.
+# SCF will mount a user-configured filesystem (CFS 文件存储 or COS 对象存储)
+# onto this path at function deployment time. Default below: /mnt.
+#
+# IMPORTANT: this path MUST match the 本地目录 you set in:
+#   函数配置 → 文件系统 → 添加 → 本地目录
+# The recommended default is /mnt (also recommended by SCF docs).
+# SCF will refuse to mount onto a non-empty path, so /mnt is fine because
+# it is created empty here.
+#
+# Sub-paths (e.g. /home/llama, /data) also work — just keep
+# MODEL_PATH / MMPROJ_PATH consistent.
 RUN mkdir -p /mnt
 
 # Entrypoint wraps llama-server with the SCF-required port/env defaults
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# SCF Web function defaults — model lives on CFS mount, not in image.
-# Override at function level if mount layout differs.
+# SCF Web function defaults — model lives on CFS/COS mount, not in image.
+#
+# Mount config (set once in console, persisted with the function version):
+#   函数配置 → 文件系统 → 添加
+#     - 类型: CFS 文件存储  (or COS 对象存储)
+#     - 存储桶/文件系统: 同地域(否则挂载失败)
+#     - 本地目录: /mnt
+#     - 子目录: 模型所在子目录(留空 = 根)
+#   角色授权: 需在 CAM 给 SCF_QcsRole 授权 COS/CFS 读权限(控制台首次挂载时会引导)
+#
+# Override MODEL_PATH / MMPROJ_PATH at function level if your mount layout
+# differs (e.g. COS path is /mnt/cosfs/<storage>/<subdir>/model).
 ENV GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
     MODEL_PATH=/mnt/model \
     MMPROJ_PATH=/mnt/mmproj \

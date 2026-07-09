@@ -40,15 +40,62 @@ docker run --init --rm --gpus all \
 > **`--init` 必须加**,否则 `docker rm -f` 后容器内 `llama-server` 会变 orphan 进程继续占 GPU(已踩)。
 
 ## SCF 部署清单(V100 GPU)
-1. 创建 CFS 文件系统(同区域、NFS 协议、通用型)
-2. 上传模型到 CFS:
-   - `gemma-4-12b-it-Q6_K.gguf` → 重命名为 `model`
-   - `mmproj-F16.gguf` → 重命名为 `mmproj`
-3. 创建 SCF 函数(容器镜像模式):
-   - 镜像:`ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b:latest`
-   - GPU 类型:V100(GN10.x 系列 32GB)
-4. 函数挂载 CFS 到 `/mnt`
-5. 验证 `/v1/chat/completions` + `chat_template_kwargs.enable_thinking=false`
+
+### 0. 前置:角色授权(只做一次)
+首次在 SCF 配文件系统挂载前,需要在 CAM 给 `SCF_QcsRole` 授 COS/CFS 读权限。控制台首次挂载时会弹引导,按提示授权即可。
+
+### 1. 准备模型存储(CFS 推荐, COS 也行)
+| 存储类型 | 适用 | 模型路径约定 |
+|----------|------|---------------|
+| **CFS 文件存储** | 多函数共享、POSIX 语义、IO 中 | CFS 子目录:留空 / `models/`<br>容器内:`/mnt/model`、`/mnt/mmproj` |
+| **COS 对象存储** | 单函数独享、便宜、跨地域可拉 | 存储桶子目录:`models/`<br>容器内:`/mnt/cosfs/<bucket-name>/models/model` |
+
+模型上传:
+- `gemma-4-12b-it-Q6_K.gguf` → 重命名为 `model`
+- `mmproj-F16.gguf` → 重命名为 `mmproj`
+
+### 2. 创建 SCF 函数(容器镜像模式)
+- 镜像:`ccr.ccs.tencentyun.com/jerryliang/gemma-4-12b:latest`
+- 部署方式:**镜像部署**
+- 运行时:**Web 函数**(因为我们监听 9000 HTTP 端口)
+- GPU 类型:V100(GN10.x 系列 32GB),如未来 SCF 支持 T4 也可
+
+### 3. 配文件系统挂载(最容易踩的一步)
+`函数配置 → 文件系统 → 添加`:
+
+```
+存储类型:   CFS 文件存储          ← 别选错成 COS
+CFS 名称:   <你的文件系统 ID>      ← 同地域
+CFS 子目录: <模型所在子目录>        ← 留空 = 根目录
+本地目录:   /mnt                  ← 跟 Dockerfile / MODEL_PATH 对齐
+```
+
+> ⚠️ **CFS 必须同地域**;本地目录必须是容器内空路径(镜像里 `mkdir -p /mnt` 已准备好)。
+
+用 COS 时:
+```
+存储类型:   COS 对象存储
+存储桶:     <你的 bucket>
+存储桶子目录: models/
+本地目录:   /mnt
+```
+然后把函数环境变量 `MODEL_PATH` 改成 `/mnt/cosfs/<bucket>/models/model`(去控制台看一眼实际挂载点,名字可能略不同)。
+
+### 4. 触发验证
+- 健康检查:HTTP 200 表示容器起来了
+- API:`/v1/chat/completions` + body 加 `"chat_template_kwargs":{"enable_thinking":false}`
+
+### 故障排查
+| 现象 | 大概率原因 |
+|------|-----------|
+| `model file not found` + log 里 `mount` 没东西 | SCF 文件系统没配 / 没保存生效 |
+| `model file not found` + log 里 `mount` 有但 `/mnt` 是空 | 选错存储类型(CFS vs COS)或子目录填错 |
+| 启动超 30s 健康检查超时 | 容器内 HTTP 监听不是 0.0.0.0:9000(本镜像已写死) |
+| `libcuda.so.1 not found` | 镜像里 CUDA driver stub 链错了——本镜像用 `server-cuda` 官方版,不会出 |
+| GPU 没识别 | 选的实例不是 GPU 型(GN10.x) |
+| 冷启动慢 | 见 `冷启动优化` 章节——开镜像加速 / 预置并发 |
+
+所有诊断都打到了 SCF 日志(看 `[entrypoint]` 开头那几行)。
 
 ## GitHub Actions Workflows
 - **`build.yml`** — 本地 build sanity check(ubuntu-latest runner,无 GPU)。**不再下载/打包模型**——只验证 Dockerfile 能 build 出镜像。
